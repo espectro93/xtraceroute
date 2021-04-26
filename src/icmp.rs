@@ -9,6 +9,8 @@ use pnet::packet::{
 };
 use std::net::Ipv4Addr;
 use pnet::packet::util::checksum;
+use crate::config::Config;
+use pnet::transport::{TransportSender};
 
 static IPV4_HEADER_LEN: u32 = 21;
 static ICMP_HEADER_LEN: u32 = 8;
@@ -43,4 +45,18 @@ pub fn create_icmp_packet<'a>(
     ipv4_packet.set_payload(icmp_packet.packet_mut());
 
     ipv4_packet
+}
+
+pub fn send_requests(config: &Config, tx: &mut TransportSender, ttl: usize, mut buf_ip: &mut [u8], mut buf_icmp: &mut [u8]) {
+    for i in 0..config.tries_per_hop {
+        let icmp_packet = create_icmp_packet(
+            &mut buf_ip,
+            &mut buf_icmp,
+            config.destination,
+            ttl as u8,
+            ((ttl - 1) * config.tries_per_hop + i) as u16);
+
+        tx.send_to(icmp_packet, std::net::IpAddr::V4(config.destination))
+            .expect("Sending packet failed!");
+    }
 }

@@ -12,12 +12,12 @@ use pnet::packet::{
     ip::IpNextHeaderProtocols,
     Packet,
 };
-use crate::icmp::create_icmp_packet;
+use crate::icmp::{send_requests};
 use crate::config::Config;
-use pnet::transport::{icmp_packet_iter, transport_channel, TransportSender};
+use pnet::transport::{icmp_packet_iter, transport_channel};
 use pnet::transport::TransportChannelType::Layer3;
-use std::panic::Location;
 use crate::location::get_location_for;
+use std::thread;
 
 static MAX_TTL: usize = 64;
 
@@ -38,6 +38,8 @@ pub struct TraceHopResult {
 
 pub fn trace_route(config: Config) -> ()
 {
+    let mut ttl: usize = 1;
+
     let (mut tx, mut rx) = transport_channel(
         1024,
         Layer3(IpNextHeaderProtocols::Icmp))
@@ -45,15 +47,13 @@ pub fn trace_route(config: Config) -> ()
 
     let mut rx = icmp_packet_iter(&mut rx);
 
-    let mut ttl: usize = 1;
-    let timeout_in_sec = Duration::from_secs(config.timeout);
 
     let mut buf_ip = [0u8; 64];
     let mut buf_icmp = [0u8; 40];
 
-    println!("{:>4}   {:<20} {:<15} {:<15}", "Hop", "Host IP address", "Location", "Answer time");
+    let timeout_in_sec = Duration::from_secs(config.timeout);
 
-    let mut hop_results: Vec<TraceHopResult> = Vec::new();
+    println!("{:>4}   {:<20} {:<15} {:<15}", "Hop", "Host IP address", "Location", "Answer time");
 
     'outer: while ttl <= MAX_TTL {
         let mut replies: Vec<TraceHop> = Vec::with_capacity(config.tries_per_hop);
@@ -79,48 +79,33 @@ pub fn trace_route(config: Config) -> ()
 
         let replies = filter_out_unhandled_packets(&config, ttl, replies);
 
+        //EchoReply means we have reached destination, TimeLimitExceeded is the response of hap where it terminates because the ttl was not high enough
+        //e.g. we start with ttl 1, so it terminates at hop 1 and sends timelimit exceeded, but we still have 10 or more hops to go so we increment and try again
         let destination_reached = replies.iter().any(|reply| reply.reply_type == IcmpTypes::EchoReply);
         if destination_reached {
             break 'outer;
         }
 
         if replies.is_empty() {
-            /* 0 received packets */
-            //println!("{:>3}.   {:^20} {:^15}", ttl, "*", "*");
+            println!("{:>3}.   {:^20} {:<15} {:^15}", ttl, "*", "N.a.", "*");
         } else if replies.len() < config.tries_per_hop {
-            /* Received less packets than were sent. */
-            //println!("{:>3}.   {:<20} {:<15} {:^15}", ttl, replies[0].hop_addr.to_string(), "Location", "*");
-            hop_results.push(TraceHopResult {
-                hop_addr: replies[0].hop_addr,
-                answer_time: String::from("*"),
-                ttl,
+            thread::spawn(move || {
+                println!("{:>3}.   {:<20} {:<15} {:^15}", ttl.clone(), replies[0].hop_addr.to_string().clone(), get_location_for(replies[0].hop_addr.clone()).unwrap_or("N.a.".to_string()), "*");
             });
         } else if replies.len() == config.tries_per_hop {
-            /* Received all packets */
-            let avrg_time = replies.iter()
+            let avg_time = replies.iter()
                 .fold(Duration::from_secs(0), |acc, reply| acc + reply.reply_time) / config.tries_per_hop as u32;
 
-            hop_results.push(TraceHopResult {
-                hop_addr: replies[0].hop_addr,
-                answer_time: duration_to_string(&avrg_time),
-                ttl,
+            let ip_clone = replies[0].hop_addr.clone();
+            thread::spawn(move || {
+                println!("{:>3}.   {:<20} {:<15} {:^15}", ttl.clone(), ip_clone.to_string(), get_location_for(ip_clone).unwrap_or("N.a.".to_string()), avg_time.as_millis());
             });
-            //println!("{:>3}.   {:<20} {:^15?}", ttl, replies[0].hop_addr.to_string(), avrg_time);
         }
-
         ttl += 1;
     }
 
     if ttl > MAX_TTL {
         println!("TTL value exceeded! Traceroute exits.", );
-    }
-
-    print_results_with_location(hop_results);
-}
-
-fn print_results_with_location(results: Vec<TraceHopResult>) {
-    for result in results.iter() {
-        println!("{:>3}.   {:<20} {:<20} {:^15?}", result.ttl, result.hop_addr.to_string(), get_location_for(result.hop_addr).unwrap_or("N.a.".to_string()), result.answer_time);
     }
 }
 
@@ -140,7 +125,6 @@ fn process_reply(reply: IcmpPacket, host: IpAddr, duration: Duration) -> Option<
         IcmpTypes::EchoReply => {
             let reply_packet = EchoReplyPacket::new(&reply.packet())
                 .expect("Parsing echo reply packet failed!");
-
             Some(TraceHop {
                 hop_addr: host,
                 reply_time: duration,
@@ -152,30 +136,9 @@ fn process_reply(reply: IcmpPacket, host: IpAddr, duration: Duration) -> Option<
     }
 }
 
-fn duration_to_string(duration: &Duration) -> String {
-    let seconds = duration.as_secs() % 60;
-    let minutes = (duration.as_secs() / 60) % 60;
-    let hours = (duration.as_secs() / 60) / 60;
-    format!("{}:{}:{}", hours, minutes, seconds)
-}
-
 fn filter_out_unhandled_packets(config: &Config, ttl: usize, replies: Vec<TraceHop>) -> Vec<TraceHop> {
     replies.into_iter().filter(|reply| {
         let sequence_number = reply.sequence_number as usize;
         (ttl - 1) * config.tries_per_hop <= sequence_number && sequence_number < ttl * config.tries_per_hop
     }).collect()
-}
-
-fn send_requests(config: &Config, tx: &mut TransportSender, ttl: usize, mut buf_ip: &mut [u8], mut buf_icmp: &mut [u8]) {
-    for i in 0..config.tries_per_hop {
-        let icmp_packet = create_icmp_packet(
-            &mut buf_ip,
-            &mut buf_icmp,
-            config.destination,
-            ttl as u8,
-            ((ttl - 1) * config.tries_per_hop + i) as u16);
-
-        tx.send_to(icmp_packet, std::net::IpAddr::V4(config.destination))
-            .expect("Sending packet failed!");
-    }
 }
