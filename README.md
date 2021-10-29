@@ -18,7 +18,7 @@ xtraceroute implements the regular traceroute logic and thus is sending ICMP Ech
 
 ### Executing program
 
-This was only tested on a linux distribution, where we need root privileges as we oparte on layer 3 to send icmp EchoRequests.
+This was only tested on a linux distribution, where we need root privileges as we oparte on layer 3 to send ICMP EchoRequests.
 
 ```
 sudo -E cargo run www.google.de
