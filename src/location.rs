@@ -1,16 +1,17 @@
 use std::net::IpAddr;
 use std::error::Error;
+use serde_json::Value;
 
 
 pub fn get_location_for(ip: IpAddr) -> Result<String, Box<dyn Error>> {
-    let geo_ip_data = reqwest::blocking::get("https://api.ipgeolocationapi.com/geolocate/".to_owned() + ip.to_string().as_str())?
+    let geo_ip_data = reqwest::blocking::get("http://ip-api.com/json/".to_owned() + ip.to_string().as_str())?
         .json::<serde_json::Value>()?;
 
-    let lat = geo_ip_data.get("geo").unwrap().get("latitude").unwrap();
-    let lng = geo_ip_data.get("geo").unwrap().get("longitude").unwrap();
+    let mut display = geo_ip_data.get("city").unwrap_or(&Value::String(String::from("No city"))).as_str().unwrap_or("No city").to_owned();
+    let country = geo_ip_data.get("country").unwrap_or(&Value::String(String::from("No country"))).as_str().unwrap_or("No country").to_owned();
 
-    let location_request = format!("http://nominatim.openstreetmap.org/reverse?format=json&lat={}&lon={}&zoom=18&addressdetails=1", lat, lng);
-    let location_for_geo = reqwest::blocking::get(location_request)?.json::<serde_json::Value>()?;
+    display.push_str(", ");
+    display.push_str(country.as_str());
 
-    Ok(location_for_geo.get("display_name").unwrap().to_string())
+    Ok(display)
 }
